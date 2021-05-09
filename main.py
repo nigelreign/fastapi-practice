@@ -1,72 +1,142 @@
-from enum import Enum
-from typing import Optional
-from pydantic import BaseModel
+import databases, sqlalchemy, datetime, uuid
 from fastapi import FastAPI
+from pydantic import BaseModel, Field
+from typing import List
 
-#adding predefined values using enum
-#1. first import enum
-#2. Create the class
-class ModelName(str, Enum):
-    alexnet = "alexnet"
-    resnet = "resnet"
-    lenet = "leneasdt"
+# to hash a password
+from passlib.context import CryptContext
 
-# passing body data using post
-class Item(BaseModel):
-    name: str
-    description: Optional[str] = None
-    price: float
-    tax: Optional[float] = None
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+## Postgress Database
+#first postgress is for username and second is for the password
+DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:5432/mydb"
+database = databases.Database(DATABASE_URL)
+metadata = sqlalchemy.MetaData()
+
+# This will create a new table in the database called py_test
+users = sqlalchemy.Table(
+    "py_users",
+    metadata,
+    sqlalchemy.Column("id"        ,sqlalchemy.String, primary_key=True),
+    sqlalchemy.Column("username"  , sqlalchemy.String),
+    sqlalchemy.Column("password"  , sqlalchemy.String),
+    sqlalchemy.Column("first_name", sqlalchemy.String),
+    sqlalchemy.Column("last_name" , sqlalchemy.String),
+    sqlalchemy.Column("gender"    , sqlalchemy.CHAR  ),
+    sqlalchemy.Column("create_at" , sqlalchemy.String),
+    sqlalchemy.Column("status"    , sqlalchemy.CHAR  ),
+)
+
+engine = sqlalchemy.create_engine(
+    DATABASE_URL
+)
+metadata.create_all(engine)
+
+# Class to create a model
+class UserList(BaseModel):
+    id: str
+    username  : str
+    password  : str
+    first_name: str
+    last_name : str
+    gender    : str
+    create_at : str
+    status    : str
+
+# This will be used as examples in http://localhost:8000/docs for POST
+class UserEntry(BaseModel):
+    username  : str = Field(..., example="nigelreign")
+    password  : str = Field(..., example="ilovejesus")
+    first_name: str = Field(..., example="Nigel")
+    last_name : str = Field(..., example="Zulu")
+    gender    : str = Field(..., example="M")
+
+# This will be used as examples in http://localhost:8000/docs for UPDATE
+class UserUpdate(BaseModel):
+    id        : str = Field(..., example="enter your ID")
+    first_name: str = Field(..., example="Nigel")
+    last_name : str = Field(..., example="Zulu")
+    gender    : str = Field(..., example="M")
+    status    : str = Field(..., example="1")
+
+# This will be used as examples in http://localhost:8000/docs for DELETE
+class UserDelete(BaseModel):
+    id        : str = Field(..., example="enter your ID")
 
 app = FastAPI()
 
+# starting the database
+@app.on_event("startup")
+async def startup():
+    await database.connect()
 
-# return a string
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+@app.on_event("shutdown")
+async def shutdown():
+    await database.disconnect()
 
-# return a value
-@app.get("/items/{item_id}")
-async def read_item(item_id: int):
-    return {"item_id": item_id}
+# GET request to get all users from the db
+@app.get("/users", response_model=List[UserList])
+async def find_all_users():
+    query = users.select()
+    return await database.fetch_all(query)
 
-@app.get("/models/{model_name}")
-# refer to the class were we created the (Model) enum
-async def get_model(model_name: ModelName):
-    if model_name == ModelName.alexnet:
-        return {"model_name": model_name, "message": "Deep Learning FTW!"}
+#POST request to add user to the database
+@app.post("/users", response_model=UserList)
+async def register_user(user: UserEntry):
+    gID   = str(uuid.uuid1())
+    gDate = str(datetime.datetime.now())
+    query = users.insert().values(
+        id         = gID,
+        username   = user.username,
+        first_name = user.first_name,
+        last_name  = user.last_name,
+        # hash password
+        password   = pwd_context.hash(user.password),
+        gender     = user.gender,
+        create_at  = gDate,
+        status     = "1"
+    )
 
-    if model_name.value == "lenet":
-        return {"model_name": model_name, "message": "LeCNN all the images"}
+    await database.execute(query)
+    return {
+        "id": gID,
+        **user.dict(),
+        "create_at": gDate,
+        "status": "1"
+    }
 
-    return {"model_name": model_name, "message": "Have some residuals"}
+@app.get("/users/{user_id}", response_model=UserList)
+async def find_user_by_id(user_id: str):
+    query = users.select().where(users.c.id == user_id)
+    return await database.fetch_one(query)
 
-# declaring multiple parameters
-@app.get("/users/{user_id}/items/{item_id}")
-async def read_user_item(
-    user_id: int, item_id: str, q: Optional[str] = None, short: bool = False
-):
-    item = {"item_id": item_id, "owner_id": user_id}
-    if q:
-        item.update({"q": q})
-    if not short:
-        item.update(
-            {"description": "This is an amazing item that has a long description"}
+
+# UPDATE request
+@app.put("/users", response_model=UserList)
+async def update_user(user: UserUpdate):
+    gDate = str(datetime.datetime.now())
+    query = users.update().\
+        where(users.c.id == user.id).\
+        values(
+            first_name = user.first_name,
+            last_name  = user.last_name,
+            gender     = user.gender,
+            create_at  = gDate,
+            status     = user.status
         )
-    return item
 
-# using post and passing body data POST
-@app.post("/items/")
-async def create_item(item: Item):
-    item_dict = item.dict()
-    if item.tax:
-        price_with_tax = item.price + item.tax
-        item_dict.update({"price_with_tax": price_with_tax})
-    return item_dict
+    await database.execute(query)
 
-# Request body + path parameters PUT
-@app.put("/items/{item_id}")
-async def update_item(item_id: int, item: Item):
-    return {"item_id": item_id, **item.dict()}
+    return await find_user_by_id(user.id)
+
+
+@app.delete("/users")
+async def delete_user(user: UserDelete):
+    query = users.delete().where(users.c.id == user.id)
+    await database.execute(query)
+
+    return {
+        "status": True,
+        "message": "User deleted successfully"
+    }
